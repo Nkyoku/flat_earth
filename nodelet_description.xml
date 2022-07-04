@@ -1,0 +1,6 @@
+<library path="lib/libflat_earth">
+    <class name="flat_earth/EarthTfPublisher" type="flat_earth::EarthTfPublisher" base_class_type="nodelet::Nodelet">
+        <description>
+        </description>
+    </class>
+</library>
