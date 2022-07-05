@@ -1,6 +1,5 @@
 #!/usr/bin/python3
 
-import queue
 from mpl_toolkits import mplot3d
 import matplotlib.pyplot as plt
 import numpy as np
@@ -45,7 +44,7 @@ def wgs84_to_geopoint(pos: wgs84.Wgs84) -> GeoPointStamped:
 
 if __name__ == "__main__":
     rospy.init_node("hamster")
-    origin_publisher = rospy.Publisher("origin", GeoPointStamped, queue_size=1, latch=True)
+    ref_publisher = rospy.Publisher("ref", GeoPointStamped, queue_size=1, latch=True)
 
     tf_buffer = tf2_ros.Buffer()
     tf_listener = tf2_ros.TransformListener(tf_buffer)
@@ -53,12 +52,12 @@ if __name__ == "__main__":
     rospy.sleep(1.0)
 
     # 原点をパブリッシュする
-    origin_publisher.publish(wgs84_to_geopoint(wgs84.Wgs84(0.0, 0.0, 0.0)))
+    ref_publisher.publish(wgs84_to_geopoint(wgs84.Wgs84(0.0, 0.0, 0.0)))
 
     # TFフレームを待つ
     while True:
         if tf_buffer.can_transform("earth", "map", rospy.Time(0), rospy.Duration(1)):
-            if tf_buffer.can_transform("earth", "contact", rospy.Time(0), rospy.Duration(1)):
+            if tf_buffer.can_transform("earth", "ref", rospy.Time(0), rospy.Duration(1)):
                 break
         if rospy.is_shutdown():
             exit()
@@ -109,6 +108,8 @@ if __name__ == "__main__":
     move_theta = 0.0
 
     while not rospy.is_shutdown():
+        stamp = rospy.Time.now()
+
         # 終了キー
         if "escape" in pressing_key:
             break
@@ -117,13 +118,13 @@ if __name__ == "__main__":
         move_dx = 0.0
         move_dy = 0.0
         if "w" in pressing_key:
-            move_dy += 100
+            move_dy += 100000
         if "a" in pressing_key:
-            move_dx -= 100
+            move_dx -= 100000
         if "s" in pressing_key:
-            move_dy -= 100
+            move_dy -= 100000
         if "d" in pressing_key:
-            move_dx += 100
+            move_dx += 100000
         if "e" in pressing_key:
             move_theta -= math.pi / 10
         if "q" in pressing_key:
@@ -135,59 +136,49 @@ if __name__ == "__main__":
 
             pose = PoseStamped()
             pose.header.frame_id = "map"
-            pose.header.stamp = rospy.Time.now()
+            pose.header.stamp = stamp
             pose.pose.position.x = move_xyz[0]
             pose.pose.position.y = move_xyz[1]
             pose.pose.position.z = move_xyz[2]
             pose.pose.orientation.w = 1.0
             for _ in range(1):
-                pose = tf_buffer.transform(pose, "earth")
-
+                pose = tf_buffer.transform(pose, "earth", rospy.Duration(1))
             current_position = np.array([pose.pose.position.x, pose.pose.position.y, pose.pose.position.z])
 
             current_wgs84 = wgs84.Wgs84.from_xyz(current_position)
             current_wgs84.altitude = 0.0
-            origin_publisher.publish(wgs84_to_geopoint(current_wgs84))
-
-            #current_wgs84.altitude = move_xyz[2]
-            #current_position = current_wgs84.to_xyz()
+            ref_publisher.publish(wgs84_to_geopoint(current_wgs84))
 
             path_wgs84.append_wgs84(current_wgs84)
 
             ax3.relim()
             ax3.autoscale_view()
 
-            pass
-        
-        
-
         pose = PoseStamped()
         pose.header.frame_id = "map"
-        pose.header.stamp = rospy.Time.now()
+        pose.header.stamp = stamp
         pose.pose.position.x = move_xyz[0]
         pose.pose.position.y = move_xyz[1]
         pose.pose.position.z = move_xyz[2]
         pose.pose.orientation.w = 1.0
         for _ in range(1):
-            pose = tf_buffer.transform(pose, "earth")
+            pose = tf_buffer.transform(pose, "earth", rospy.Duration(1))
         current_position = np.array([pose.pose.position.x, pose.pose.position.y, pose.pose.position.z])
         print(f"Time:{rospy.Time.now()}, pos={current_position}, {'*' if (move_dx != 0.0) or (move_dy != 0.0) else ''}")
-
-
 
         # 接平面を描画する
         plane_data = np.array([[-1000000, -1000000, 0], [-1000000, 1000000, 0], [1000000, 1000000, 0],
                                [1000000, -1000000, 0], [-1000000, -1000000, 0], [0, 0, 0], [0, 0, 1000000]])
         for row in range(plane_data.shape[0]):
             pose = PoseStamped()
-            pose.header.frame_id = "contact"
-            pose.header.stamp = rospy.Time.now()
+            pose.header.frame_id = "ref"
+            pose.header.stamp = stamp
             pose.pose.position.x = plane_data[row, 0]
             pose.pose.position.y = plane_data[row, 1]
             pose.pose.position.z = plane_data[row, 2]
             pose.pose.orientation.w = 1.0
             for _ in range(1):
-                pose = tf_buffer.transform(pose, "earth")
+                pose = tf_buffer.transform(pose, "earth", rospy.Duration(1))
             plane_data[row, 0] = pose.pose.position.x
             plane_data[row, 1] = pose.pose.position.y
             plane_data[row, 2] = pose.pose.position.z

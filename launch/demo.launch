@@ -1,7 +1,8 @@
 <launch>
     <node pkg="nodelet" type="nodelet" name="earth_tf_publisher" args="standalone flat_earth/EarthTfPublisher" output="screen">
         <param name="num_worker_threads" value="1" />
+        <param name="publish_period" value="0.1" />
     </node>
-    <node pkg="flat_earth" type="rollingball.py" name="hamster" output="screen">
+    <node pkg="flat_earth" type="demo.py" name="demo" output="screen">
     </node>
 </launch>

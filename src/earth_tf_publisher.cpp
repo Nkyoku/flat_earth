@@ -7,14 +7,17 @@
 namespace flat_earth {
 
 void EarthTfPublisher::onInit(void) {
-    ros::NodeHandle nh = getNodeHandle();
-    ros::NodeHandle pnh = getPrivateNodeHandle();
+    std::unique_lock<std::mutex> lock(_mutex);
+
+    ros::NodeHandle nh = getMTNodeHandle();
+    ros::NodeHandle pnh = getMTPrivateNodeHandle();
 
     // パラメータを取得する
-    double publish_period = 0.5;
-    double stamp_offset = 1.0;
+    double publish_period = 0.0;
+    double stamp_offset = 0.0;
     pnh.getParam("earth_frame_id", _earth_frame_id);
     pnh.getParam("map_frame_id", _map_frame_id);
+    pnh.getParam("ref_frame_id", _ref_frame_id);
     pnh.getParam("publish_period", publish_period);
     pnh.getParam("stamp_offset", stamp_offset);
     if (!std::isfinite(stamp_offset) || (stamp_offset < 0.0)) {
@@ -26,19 +29,16 @@ void EarthTfPublisher::onInit(void) {
     // Publisher, Subscriberを作成する
     constexpr int QUEUE_SIZE = 10;
     _tf_broadcaster = std::make_unique<tf2_ros::TransformBroadcaster>();
-    _origin_subscriber = nh.subscribe("origin", QUEUE_SIZE, &EarthTfPublisher::onOriginReceived, this);
+    _ref_subscriber = nh.subscribe("ref", QUEUE_SIZE, &EarthTfPublisher::onReferenceReceived, this);
 
     // 定期送信用のタイマーを作成する
     if (0.0 < publish_period) {
-        _timer = nh.createTimer(ros::Duration(publish_period), &EarthTfPublisher::onTimer, this);
+        _timer = nh.createTimer(ros::Duration(publish_period), &EarthTfPublisher::onTimer, this, false, false);
     }
 }
 
 void EarthTfPublisher::onTimer(const ros::TimerEvent& e) {
-    if (_last_stamp_ns == 0) {
-        // tfフレームを送信したことがないなら定期送信を行わない
-        return;
-    }
+    std::unique_lock<std::mutex> lock(_mutex);
 
     uint64_t stamp_ns = ros::Time::now().toNSec() + _stamp_offset_ns;
     if (stamp_ns <= _last_stamp_ns) {
@@ -56,68 +56,87 @@ void EarthTfPublisher::onTimer(const ros::TimerEvent& e) {
     _last_stamp_ns = stamp_ns;
 }
 
-void EarthTfPublisher::onOriginReceived(const geographic_msgs::GeoPointStamped::ConstPtr& origin) {
-    uint64_t stamp_ns = ros::Time::now().toNSec() + _stamp_offset_ns;
+void EarthTfPublisher::onReferenceReceived(const geographic_msgs::GeoPointStamped::ConstPtr& ref) {
+    std::unique_lock<std::mutex> lock(_mutex);
+
+    // 基準座標のタイムスタンプを取得する。
+    // タイムスタンプがないなら現在のROS時刻を使用する。
+    uint64_t stamp_ns = ref->header.stamp.toNSec();
+    if (stamp_ns == 0) {
+        stamp_ns = ros::Time::now().toNSec();
+    }
+    stamp_ns += _stamp_offset_ns;
 
     auto tf_msgs = std::vector<geometry_msgs::TransformStamped>();
 
-    // 地球中心座標系における接点での接平面の法線ベクトルを求める
-    auto new_contact_wgs84 = Wgs84(origin->position.latitude, origin->position.longitude, origin->position.altitude);
-    auto new_contact_xyz = new_contact_wgs84.xyz();
-    auto new_contact_normal = new_contact_wgs84.normal();
+    // 地球中心座標系における基準座標での接平面の法線ベクトルを求める
+    auto new_ref_wgs84 = Wgs84(ref->position.latitude, ref->position.longitude, ref->position.altitude);
+    auto new_ref_xyz = new_ref_wgs84.xyz();
+    auto new_ref_normal = new_ref_wgs84.normal();
 
     if (_last_stamp_ns == 0) {
         // 起動して初めての原点を受け取った
 
-        // 接点座標系から地球中心座標系への変換行列を求める
-        auto new_c2e_quat = Eigen::Quaterniond::FromTwoVectors(Eigen::Vector3d{0.0, 0.0, 1.0}, new_contact_normal);
-        _c2e_transform = Transform(new_c2e_quat, new_contact_xyz);
+        // 基準座標系から地球中心座標系への変換行列を求める
+        auto new_r2e_quat = Eigen::Quaterniond::FromTwoVectors(Eigen::Vector3d{0.0, 0.0, 1.0}, new_ref_normal);
+        _r2e_transform = Transform(new_r2e_quat, new_ref_xyz);
+        _m2e_transform = _r2e_transform;
 
-        // 基準座標系から接点座標系への変換行列を設定する
-        _o2c_transform = {};
+        // map座標系から基準座標系への変換行列を設定する
+        _m2r_transform = {};
 
+        // 本来の現在時刻のtfフレームを作成する
         if (0 < _stamp_offset_ns) {
-            // 本来の現在時刻のtfフレームを作成する
             appendCurrentTransform(stamp_ns - _stamp_offset_ns, tf_msgs);
+        }
+
+        // 定期送信用のタイマーを開始する
+        if (_timer.isValid()) {
+            _timer.start();
         }
     }
     else {
-        // 新しい接点座標系から地球中心座標系への変換行列を求める(方法1)
+        // 新しい基準座標系から地球中心座標系への変換行列を求める(方法1)
         // Pros. 南極点において特異点が発生しない
-        // Cons. 接点座標系の変換行列が一意に定まらない
-        auto old2new_c2c_quat = Eigen::Quaterniond::FromTwoVectors(_contact_normal, new_contact_normal);
-        auto new_c2e_transform = Transform(old2new_c2c_quat * _c2e_transform.q, new_contact_xyz);
+        // Cons. 基準座標系の変換行列が一意に定まらない
+        auto old2new_r2r_quat = Eigen::Quaterniond::FromTwoVectors(_ref_normal, new_ref_normal);
+        auto new_r2e_transform = Transform(old2new_r2r_quat * _r2e_transform.q, new_ref_xyz);
 
-        // 新しい接点座標系から地球中心座標系への変換行列を求める(方法2)
-        // Pros. Lat,Lonが分かれば接点座標系の変換行列が一意に定まる
+        // 新しい基準座標系から地球中心座標系への変換行列を求める(方法2)
+        // Pros. Lat,Lonが分かれば基準座標系の変換行列が一意に定まる
         // Cons. 南極点において特異点が発生する
-        // auto new_c2e_quat = Eigen::Quaterniond::FromTwoVectors(Eigen::Vector3d{0.0, 0.0, 1.0}, new_contact_normal);
-        // auto new_c2e_transform = Transform(new_c2e_quat, new_contact_xyz);
+        // auto new_r2e_quat = Eigen::Quaterniond::FromTwoVectors(Eigen::Vector3d{0.0, 0.0, 1.0}, new_ref_normal);
+        // auto new_r2e_transform = Transform(new_r2e_quat, new_ref_xyz);
 
-        // 古い接点座標系から新しい接点座標系への変換行列を求める
-        auto old2new_c2c_transform = Transform::compose(new_c2e_transform.inv(), _c2e_transform);
+        // 古い基準座標系から新しい基準座標系への変換行列を求める
+        auto old2new_r2r_transform = Transform::compose(new_r2e_transform.inv(), _r2e_transform);
 
-        // 新しい基準座標系から接点座標系への変換行列を求める
+        // 新しいmap座標系から基準座標系への変換行列を求める
         // 2次元化する
-        auto new_o2c_transform = Transform::compose(old2new_c2c_transform, _o2c_transform);
-        new_o2c_transform.q.x() = 0.0;
-        new_o2c_transform.q.y() = 0.0;
-        new_o2c_transform.t[2] = 0.0;
-        new_o2c_transform.normalize();
+        auto new_m2r_transform = Transform::compose(old2new_r2r_transform, _m2r_transform);
+        new_m2r_transform.q.x() = 0.0;
+        new_m2r_transform.q.y() = 0.0;
+        new_m2r_transform.t[2] = 0.0;
+        new_m2r_transform.normalize();
 
         // 値を更新する
-        _c2e_transform = new_c2e_transform;
-        _o2c_transform = new_o2c_transform;
-        _contact_xyz = new_contact_xyz;
-        _contact_wgs84 = new_contact_wgs84;
-        _contact_normal = new_contact_normal;
+        _r2e_transform = new_r2e_transform;
+        _m2r_transform = new_m2r_transform;
+        _m2e_transform = Transform::compose(_r2e_transform, _m2r_transform);
+        _ref_xyz = new_ref_xyz;
+        _ref_wgs84 = new_ref_wgs84;
+        _ref_normal = new_ref_normal;
     }
 
     // 現在のtfフレームを作成する
-    appendCurrentTransform(stamp_ns, tf_msgs);
+    if (_last_stamp_ns < stamp_ns) {
+        appendCurrentTransform(stamp_ns, tf_msgs);
+    }
 
     // tfフレームを送信する
-    _tf_broadcaster->sendTransform(tf_msgs);
+    if (!tf_msgs.empty()) {
+        _tf_broadcaster->sendTransform(tf_msgs);
+    }
 
     _last_stamp_ns = stamp_ns;
 }
@@ -125,8 +144,10 @@ void EarthTfPublisher::onOriginReceived(const geographic_msgs::GeoPointStamped::
 void EarthTfPublisher::appendCurrentTransform(uint64_t stamp_ns, std::vector<geometry_msgs::TransformStamped>& tf_msgs) {
     ros::Time stamp;
     stamp.fromNSec(stamp_ns);
-    tf_msgs.push_back(_o2c_transform.toMsg("contact", _map_frame_id, stamp));
-    tf_msgs.push_back(_c2e_transform.toMsg(_earth_frame_id, "contact", stamp));
+    tf_msgs.push_back(_m2e_transform.toMsg(_earth_frame_id, _map_frame_id, stamp));
+    if (!_ref_frame_id.empty()) {
+        tf_msgs.push_back(_r2e_transform.toMsg(_earth_frame_id, _ref_frame_id, stamp));
+    }
 }
 
 } // namespace flat_earth
