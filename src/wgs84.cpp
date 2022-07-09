@@ -1,8 +1,8 @@
 ﻿/**
  * @file wgs84.cpp
  * @author Fujii Naomichi (nkyoku@gmail.com)
- * @brief
- * @copyright Copyright (c) 2022
+ * @copyright Copyright (c) 2022 Fujii Naomichi
+ * SPDX-License-Identifier: MIT
  */
 
 #include "wgs84.hpp"

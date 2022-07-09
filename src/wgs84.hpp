@@ -1,14 +1,13 @@
 ﻿/**
  * @file wgs84.hpp
  * @author Fujii Naomichi (nkyoku@gmail.com)
- * @brief
- * @copyright Copyright (c) 2022
+ * @copyright Copyright (c) 2022 Fujii Naomichi
  * SPDX-License-Identifier: MIT
  */
 
 #pragma once
 
-#include <eigen3/Eigen/Dense>
+#include <Eigen/Dense>
 
 namespace flat_earth {
 

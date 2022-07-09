@@ -1,3 +1,10 @@
+/**
+ * @file earth_tf_publisher.cpp
+ * @author Fujii Naomichi (nkyoku@gmail.com)
+ * @copyright Copyright (c) 2022 Fujii Naomichi
+ * SPDX-License-Identifier: MIT
+ */
+
 #include "earth_tf_publisher.hpp"
 #include "geometry.hpp"
 #include <cmath>

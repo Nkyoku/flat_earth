@@ -1,3 +1,10 @@
+/**
+ * @file transform.hpp
+ * @author Fujii Naomichi (nkyoku@gmail.com)
+ * @copyright Copyright (c) 2022 Fujii Naomichi
+ * SPDX-License-Identifier: MIT
+ */
+
 #pragma once
 
 #include <Eigen/Geometry>
