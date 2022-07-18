@@ -1,0 +1,13 @@
+<launch> 
+    <include file="$(find flat_earth)/launch/flat_earth.launch">
+        <arg name="tf_timeout" value="1.0" />
+        <arg name="publish_period" value="0.0" />
+    </include>
+    <test pkg="flat_earth" test-name="orbiting" type="orbiting.py">
+        <param name="origin" value="35 135 0" />
+        <param name="target" value="36 136 0" />
+        <param name="min_delta" value="1.0" />
+        <param name="max_delta" value="1000.0" />
+        <param name="tolerance" value="0.001" />
+    </test>
+</launch>

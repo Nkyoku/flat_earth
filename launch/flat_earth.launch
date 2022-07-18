@@ -1,0 +1,13 @@
+<launch>
+    <arg name="allow_time_reversal" default="false" />
+    <arg name="tf_timeout" default="0.0" />
+    <arg name="publish_period" default="0.0" />
+    <arg name="ref_topic" default="ref" />
+    <node pkg="nodelet" type="nodelet" name="earth_tf_publisher" args="standalone flat_earth/EarthTfPublisher">
+        <param name="num_worker_threads" value="1" />
+        <param name="allow_time_reversal" type="bool" value="$(arg allow_time_reversal)" />
+        <param name="tf_timeout" type="double" value="$(arg tf_timeout)" />
+        <param name="publish_period" type="double" value="$(arg publish_period)" />
+        <remap from="ref" to="$(arg ref_topic)" />
+    </node>
+</launch>

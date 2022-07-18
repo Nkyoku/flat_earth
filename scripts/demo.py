@@ -4,14 +4,16 @@ from mpl_toolkits import mplot3d
 import matplotlib.pyplot as plt
 import numpy as np
 import math
+import sys
 import wgs84
-from plot import Wgs84EllipsoidPlot, Wgs84PathPlot, PathPlot2d
-import copy
+from plot import Wgs84EllipsoidPlot, Wgs84PathPlot, PathPlot2d, AxesPlot3d
 import rospy
-import tf2_ros
+import tf2_ros as tf2
 import tf2_geometry_msgs
+from std_msgs.msg import Header, Time
 from geographic_msgs.msg import GeoPointStamped
-from geometry_msgs.msg import PointStamped, PoseStamped
+from geometry_msgs.msg import Point, PointStamped, TransformStamped
+from geographiclib.geodesic import Geodesic
 
 
 def plot_axis_2d(ax: plt.Axes, length: float, transform: np.ndarray):
@@ -32,36 +34,104 @@ def plot_axis_3d(ax: plt.Axes, length: float, transform: np.ndarray):
     ax.plot([pt0[0], pt3[0]], [pt0[1], pt3[1]], color="b")
 
 
-def wgs84_to_geopoint(pos: wgs84.Wgs84) -> GeoPointStamped:
+def wgs84_to_geopoint(pos: wgs84.Wgs84, *, stamp=rospy.Time(0)) -> GeoPointStamped:
     origin = GeoPointStamped()
-    origin.header.frame_id = ""
-    origin.header.stamp = rospy.Time.now()
+    origin.header.frame_id = "gps"
+    origin.header.stamp = rospy.Time.now() if stamp.is_zero() else stamp
     origin.position.latitude = pos.latitude
     origin.position.longitude = pos.longitude
     origin.position.altitude = pos.altitude
     return origin
 
 
+def xyz_to_transform(pos: np.ndarray = np.zeros(3), theta: float = 0.0, *, stamp=rospy.Time(0)) -> TransformStamped:
+    m_g_tf = TransformStamped()
+    m_g_tf.header.frame_id = "map"
+    m_g_tf.header.stamp = rospy.Time.now() if stamp.is_zero() else stamp
+    m_g_tf.child_frame_id = "gps"
+    m_g_tf.transform.translation.x = pos[0]
+    m_g_tf.transform.translation.y = pos[1]
+    m_g_tf.transform.translation.z = pos[2]
+    m_g_tf.transform.rotation.z = math.sin(theta * 0.5)
+    m_g_tf.transform.rotation.w = math.cos(theta * 0.5)
+    return m_g_tf
+
+
+def get_north_pole(stamp: rospy.Time, tf_buffer: tf2.Buffer) -> np.ndarray:
+    pole_point = PointStamped()
+    pole_point.header.frame_id = "earth"
+    pole_point.header.stamp = stamp
+    pole_point.point.x = 0.0
+    pole_point.point.y = 0.0
+    pole_point.point.z = wgs84.B
+    pole_point = tf_buffer.transform(pole_point, "map", rospy.Duration(1))
+    return np.array((pole_point.point.x, pole_point.point.y))
+
+
+def heading_to_angle(heading: float, gps_frame_id: str, stamp: rospy.Time, tf_buffer: tf2.Buffer) -> float:
+    """左手系北基準の方位角をmap座標系の角度に変換する。"""
+    pole_pos = get_north_pole(stamp, tf_buffer)
+    gps_tf: TransformStamped = tf_buffer.lookup_transform("map", gps_frame_id, stamp, rospy.Duration(1))
+    gps_pos = np.array((gps_tf.transform.translation.x, gps_tf.transform.translation.y))
+    direction = pole_pos - gps_pos
+    length = np.linalg.norm(direction)
+    if length < sys.float_info.epsilon:
+        return 0.0
+    return (math.atan2(direction[1], direction[0]) - heading) % (2 * math.pi)
+
+
+def angle_to_heading(gps_pos: np.ndarray, gps_angle: float, stamp: rospy.Time, tf_buffer: tf2.Buffer) -> float:
+    pole_pos = get_north_pole(stamp, tf_buffer)
+    a = np.array([math.cos(gps_angle), math.sin(gps_angle)])
+    b = pole_pos - gps_pos[0:2]
+    b /= np.linalg.norm(b)
+    theta = math.acos(np.dot(a, b))
+    if np.cross(a, b) < 0.0:
+        theta = math.pi * 2 - theta
+    return theta
+
+
 if __name__ == "__main__":
-    rospy.init_node("hamster")
+    rospy.init_node("demo")
     ref_publisher = rospy.Publisher("ref", GeoPointStamped, queue_size=1, latch=True)
+    request_publisher = rospy.Publisher("request", Time, queue_size=1, latch=True)
 
-    tf_buffer = tf2_ros.Buffer()
-    tf_listener = tf2_ros.TransformListener(tf_buffer)
+    tf_buffer = tf2.Buffer()
+    tf_listener = tf2.TransformListener(tf_buffer)
+    tf_broadcaster = tf2.TransformBroadcaster()
 
-    rospy.sleep(1.0)
+    # gps座標系の現在地
+    origin_wgs84 = wgs84.Wgs84(35.0, 135.0, 0.0)
 
-    # 原点をパブリッシュする
-    ref_publisher.publish(wgs84_to_geopoint(wgs84.Wgs84(0.0, 0.0, 0.0)))
+    # gps座標系の目的地
+    destinaton_wgs84 = wgs84.Wgs84(55.0, 5.0, 0.0)
+
+    # 方位角を決定する
+    course = Geodesic.WGS84.Inverse(origin_wgs84.latitude, origin_wgs84.longitude, destinaton_wgs84.latitude, destinaton_wgs84.longitude)
+    rospy.loginfo(f"Coodinate from {course['lat1']}, {course['lon1']} to {course['lat2']}, {course['lon2']}")
+    rospy.loginfo(f"Initial heading is {course['azi1']}")
+    origin_heading = course["azi1"] / 180.0 * math.pi
 
     # TFフレームを待つ
-    while True:
-        if tf_buffer.can_transform("earth", "map", rospy.Time(0), rospy.Duration(1)):
-            if tf_buffer.can_transform("earth", "ref", rospy.Time(0), rospy.Duration(1)):
-                break
-        if rospy.is_shutdown():
-            exit()
+    while not rospy.is_shutdown():
+        stamp = rospy.Time.now()
+
+        # map<-gpsへの変換をbroadcastする
+        tf_broadcaster.sendTransform(xyz_to_transform(stamp=stamp))
+
+        # 原点をパブリッシュする
+        ref_publisher.publish(wgs84_to_geopoint(origin_wgs84, stamp=stamp))
+
+        # 必要な変換の受信を待つ
+        if tf_buffer.can_transform("earth", "map", stamp, rospy.Duration(1)):
+            break
         rospy.loginfo("Waiting TF frame...")
+    else:
+        exit()
+
+    # map座標系でのgps座標系の初期姿勢
+    gps_pos = np.zeros(3)
+    gps_angle = heading_to_angle(origin_heading, "gps", stamp, tf_buffer)
 
     # プロットを作成する
     plt.rcParams['keymap.save'].remove('s')
@@ -90,24 +160,21 @@ if __name__ == "__main__":
     ax2.set_yticks(np.linspace(-90, 90, 13))
     ax2.grid()
 
-    # map座標系を基準として表示する
-    # ax3
-
     # プロットオブジェクトを作成する
     ellipsoid = Wgs84EllipsoidPlot()
     path_wgs84 = Wgs84PathPlot(color="r")
     path_2d = PathPlot2d(color="r")
-    plane_3d = None
+    axes_3d = AxesPlot3d()
+    axes_3d.scale = 1000000
 
     # 押下中のキーはpressing_keyに反映される
     pressing_key: "set[str]" = set()
     fig.canvas.mpl_connect('key_press_event', lambda event: [pressing_key.add(event.key)])
     fig.canvas.mpl_connect('key_release_event', lambda event: [pressing_key.remove(event.key)])
-
-    move_xyz = np.zeros(3)
-    move_theta = 0.0
+    plt.figtext(0.001, 0.001, "'W' : Move forward, 'S' : Move back\n'A' : Move left, 'D' : Move right\n'Z' : Move Down, 'X' : Move up\n'Q' : Turn left, 'E' : Turn right\n'Esc' : Exit demo")
 
     while not rospy.is_shutdown():
+        last_stamp = stamp
         stamp = rospy.Time.now()
 
         # 終了キー
@@ -117,80 +184,70 @@ if __name__ == "__main__":
         # 移動キー
         move_dx = 0.0
         move_dy = 0.0
+        move_dz = 0.0
+        move_dw = 0.0
         if "w" in pressing_key:
-            move_dy += 100000
-        if "a" in pressing_key:
-            move_dx -= 100000
-        if "s" in pressing_key:
-            move_dy -= 100000
-        if "d" in pressing_key:
             move_dx += 100000
+        if "a" in pressing_key:
+            move_dy += 100000
+        if "s" in pressing_key:
+            move_dx -= 100000
+        if "d" in pressing_key:
+            move_dy -= 100000
+        if "z" in pressing_key:
+            move_dz -= 100000
+        if "x" in pressing_key:
+            move_dz += 100000
         if "e" in pressing_key:
-            move_theta -= math.pi / 10
+            move_dw -= math.pi / 10
         if "q" in pressing_key:
-            move_theta += math.pi / 10
-        if (move_dx != 0.0) or (move_dy != 0.0):
-            move_xyz += np.matmul(np.array([[math.cos(move_theta), -math.sin(move_theta), 0.0], [math.sin(move_theta), math.cos(move_theta), 0.0], [0.0, 0.0, 1.0]]),
-                                  np.array([move_dx, move_dy, 0.0]))
-            path_2d.append_xyz(move_xyz)
+            move_dw += math.pi / 10
 
-            pose = PoseStamped()
-            pose.header.frame_id = "map"
-            pose.header.stamp = stamp
-            pose.pose.position.x = move_xyz[0]
-            pose.pose.position.y = move_xyz[1]
-            pose.pose.position.z = move_xyz[2]
-            pose.pose.orientation.w = 1.0
-            for _ in range(1):
-                pose = tf_buffer.transform(pose, "earth", rospy.Duration(1))
-            current_position = np.array([pose.pose.position.x, pose.pose.position.y, pose.pose.position.z])
+        update_plot = False
+        if (move_dx != 0.0) or (move_dy != 0.0) or (move_dz != 0.0) or (move_dw != 0.0):
+            gps_angle += move_dw
+            gps_pos += np.matmul(np.array([[math.cos(gps_angle), -math.sin(gps_angle), 0.0], [math.sin(gps_angle), math.cos(gps_angle), 0.0], [0.0, 0.0, 1.0]]),
+                                 np.array([move_dx, move_dy, move_dz]))
+            update_plot = True
 
-            current_wgs84 = wgs84.Wgs84.from_xyz(current_position)
-            current_wgs84.altitude = 0.0
-            ref_publisher.publish(wgs84_to_geopoint(current_wgs84))
+        # GPS座標系への変換をpublishする
+        tf_broadcaster.sendTransform(xyz_to_transform(gps_pos, gps_angle, stamp=stamp))
 
-            path_wgs84.append_wgs84(current_wgs84)
+        if update_plot:
+            # 移動した後のgps座標系の原点のGeoPointStampedをpublishする
+            gps_point_msg = PointStamped(Header(0, last_stamp, "map"), Point(gps_pos[0], gps_pos[1], gps_pos[2]))
+            try:
+                gps_point_msg = tf_buffer.transform(gps_point_msg, "earth", rospy.Duration(1))
+            except tf2.TransformException as e:
+                rospy.logerr(e)
+            gps_point = np.array([gps_point_msg.point.x, gps_point_msg.point.y, gps_point_msg.point.z])
+            gps_wgs84 = wgs84.Wgs84.from_xyz(gps_point)
+            gps_wgs84.altitude = gps_pos[2]  # 高度はmap座標系上のz座標とする
+            ref_publisher.publish(wgs84_to_geopoint(gps_wgs84, stamp=stamp))
 
+            # プロットデータを更新する
+            path_2d.append_xyz(gps_pos)
+            path_wgs84.append_wgs84(gps_wgs84)
             ax3.relim()
             ax3.autoscale_view()
 
-        pose = PoseStamped()
-        pose.header.frame_id = "map"
-        pose.header.stamp = stamp
-        pose.pose.position.x = move_xyz[0]
-        pose.pose.position.y = move_xyz[1]
-        pose.pose.position.z = move_xyz[2]
-        pose.pose.orientation.w = 1.0
-        for _ in range(1):
-            pose = tf_buffer.transform(pose, "earth", rospy.Duration(1))
-        current_position = np.array([pose.pose.position.x, pose.pose.position.y, pose.pose.position.z])
-        print(f"Time:{rospy.Time.now()}, pos={current_position}, {'*' if (move_dx != 0.0) or (move_dy != 0.0) else ''}")
-
-        # 接平面を描画する
-        plane_data = np.array([[-1000000, -1000000, 0], [-1000000, 1000000, 0], [1000000, 1000000, 0],
-                               [1000000, -1000000, 0], [-1000000, -1000000, 0], [0, 0, 0], [0, 0, 1000000]])
-        for row in range(plane_data.shape[0]):
-            pose = PoseStamped()
-            pose.header.frame_id = "ref"
-            pose.header.stamp = stamp
-            pose.pose.position.x = plane_data[row, 0]
-            pose.pose.position.y = plane_data[row, 1]
-            pose.pose.position.z = plane_data[row, 2]
-            pose.pose.orientation.w = 1.0
-            for _ in range(1):
-                pose = tf_buffer.transform(pose, "earth", rospy.Duration(1))
-            plane_data[row, 0] = pose.pose.position.x
-            plane_data[row, 1] = pose.pose.position.y
-            plane_data[row, 2] = pose.pose.position.z
-        if plane_3d is None:
-            plane_3d = ax1.plot(plane_data[:, 0], plane_data[:, 1], plane_data[:, 2], color="g")[0]
+            # 座標と方位を出力する
+            heading = angle_to_heading(gps_pos, gps_angle, stamp, tf_buffer) / math.pi * 180.0
+            rospy.loginfo(
+                f"XYZ=[{gps_pos[0]:.0f}, {gps_pos[1]:.0f}, {gps_pos[2]:.0f}], LLA=[{gps_wgs84.latitude:16.12f}, {gps_wgs84.longitude:17.12f}, {gps_wgs84.altitude:.3f}], Heading={heading}")
         else:
-            plane_3d.set_data_3d(plane_data[:, 0], plane_data[:, 1], plane_data[:, 2])
+            # flat_earthノードにTFだけpublishさせる
+            request_publisher.publish(Time(stamp))
 
+        # GPS座標系を描画する
+        axes_3d.set_transform("gps", "earth", stamp, tf_buffer)
+
+        # プロットを更新する
         ellipsoid.plot(ax1)
         path_wgs84.plot3d(ax1)
         path_wgs84.plot2d(ax2)
         path_2d.plot2d(ax3)
+        axes_3d.plot3d(ax1)
 
         plt.pause(0.1)
 

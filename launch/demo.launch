@@ -1,8 +1,7 @@
 <launch>
-    <node pkg="nodelet" type="nodelet" name="earth_tf_publisher" args="standalone flat_earth/EarthTfPublisher" output="screen">
-        <param name="num_worker_threads" value="1" />
-        <param name="publish_period" value="0.1" />
-    </node>
-    <node pkg="flat_earth" type="demo.py" name="demo" output="screen">
-    </node>
+    <include file="$(find flat_earth)/launch/flat_earth.launch">
+        <arg name="tf_timeout" value="1.0" />
+        <arg name="publish_period" value="0.0" />
+    </include>
+    <node pkg="flat_earth" type="demo.py" name="demo" output="screen" required="true" />
 </launch>

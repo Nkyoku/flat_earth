@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 <package format="2">
     <name>flat_earth</name>
-    <version>0.0.0</version>
+    <version>1.0.0</version>
     <description>The flat_earth package</description>
     <maintainer email="nkyoku@gmail.com">Fujii Naomichi</maintainer>
     <license>MIT License</license>
@@ -16,6 +16,7 @@
     <depend>tf2</depend>
     <depend>tf2_msgs</depend>
     <depend>tf2_ros</depend>
+    <exec_depend>python-geographiclib</exec_depend>
     <export>
         <nodelet plugin="${prefix}/nodelet_description.xml"/>
     </export>
